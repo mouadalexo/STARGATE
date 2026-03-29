@@ -403,11 +403,19 @@ async function handleVerificationSubmit(interaction: ModalSubmitInteraction) {
     applicationNumber
   );
 
-  await requestsChannel.send({
+  const requestMsg = await requestsChannel.send({
     content: config?.verificatorsRoleId ? `<@&${config.verificatorsRoleId}>` : undefined,
     embeds: [requestEmbed],
     components: [buildActionButtons(false)],
   });
+
+  await db
+    .update(verificationSessionsTable)
+    .set({ requestMessageId: requestMsg.id })
+    .where(and(
+      eq(verificationSessionsTable.guildId, guildId),
+      eq(verificationSessionsTable.memberId, user.id),
+    ));
 }
 
 async function handleVerificationAction(interaction: ButtonInteraction) {
@@ -884,11 +892,24 @@ async function handlePending(message: Message, config: Awaited<ReturnType<typeof
         .setColor(COLOR_DENY)
         .setFooter({ text: `Application #${session.id} • PENDING — Reposted by ${message.author.username}` });
 
-      await requestsChannel.send({
+      if (session.requestMessageId) {
+        const oldMsg = await requestsChannel.messages.fetch(session.requestMessageId).catch(() => null);
+        if (oldMsg) await oldMsg.edit({ components: [buildActionButtons(true)] }).catch(() => {});
+      }
+
+      const newMsg = await requestsChannel.send({
         content: config.verificatorsRoleId ? `<@&${config.verificatorsRoleId}>` : undefined,
         embeds: [pendingEmbed],
         components: [buildActionButtons(false)],
       });
+
+      await db
+        .update(verificationSessionsTable)
+        .set({ requestMessageId: newMsg.id })
+        .where(and(
+          eq(verificationSessionsTable.guildId, message.guild!.id),
+          eq(verificationSessionsTable.memberId, session.memberId),
+        ));
 
       reposted++;
     } catch (e) {

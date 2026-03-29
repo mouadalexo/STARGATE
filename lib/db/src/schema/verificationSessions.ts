@@ -12,6 +12,7 @@ export const verificationSessionsTable = pgTable("verification_sessions", {
   answer4: text("answer4"),
   answer5: text("answer5"),
   status: text("status").notNull().default("pending"),
+  requestMessageId: text("request_message_id"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
