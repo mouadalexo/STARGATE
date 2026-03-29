@@ -9,6 +9,7 @@ import {
   TextInputStyle,
   ButtonInteraction,
   ModalSubmitInteraction,
+  Message,
   TextChannel,
   OverwriteType,
   ChannelType,
@@ -47,16 +48,26 @@ async function getQuestions(guildId: string): Promise<string[]> {
   return DEFAULT_QUESTIONS;
 }
 
-export function buildVerificationPanelEmbed(title?: string | null, description?: string | null) {
-  const resolvedDesc =
+function formatEmbedDescription(raw: string): string {
+  return raw;
+}
+
+export function buildVerificationPanelEmbed(title?: string | null, description?: string | null): EmbedBuilder[] {
+  const resolvedTitle = title || "Stargate — Verification";
+  const baseDesc =
     description ||
     "Welcome!\n\nClick the button below and answer the questions.\nA staff member will review your answers and verify you shortly.";
 
-  return new EmbedBuilder()
+  const titleEmbed = new EmbedBuilder()
     .setColor(BRAND)
-    .setTitle(title || "Stargate — Verification")
-    .setDescription(resolvedDesc)
+    .setDescription(`## ${resolvedTitle}`);
+
+  const descEmbed = new EmbedBuilder()
+    .setColor(BRAND)
+    .setDescription(formatEmbedDescription(baseDesc))
     .setFooter({ text: "Stargate • Verification System" });
+
+  return [titleEmbed, descEmbed];
 }
 
 function buildStartButton() {
@@ -231,7 +242,7 @@ export async function deployVerificationPanel(channel: TextChannel) {
   const title = config?.panelEmbedTitle ?? null;
   const desc = config?.panelEmbedDescription ?? null;
   await channel.send({
-    embeds: [buildVerificationPanelEmbed(title, desc)],
+    embeds: buildVerificationPanelEmbed(title, desc),
     components: [buildStartButton()],
   });
 }
@@ -242,6 +253,31 @@ export function registerVerificationModule(client: Client) {
     if (!isMainGuild(interaction.guild.id)) return;
 
     if (interaction.isButton() && interaction.customId === "verification_start") {
+      const existingPending = await db
+        .select()
+        .from(verificationSessionsTable)
+        .where(
+          and(
+            eq(verificationSessionsTable.guildId, interaction.guild!.id),
+            eq(verificationSessionsTable.memberId, interaction.user.id),
+            eq(verificationSessionsTable.status, "submitted")
+          )
+        )
+        .limit(1);
+
+      if (existingPending.length > 0) {
+        await interaction.reply({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(BRAND)
+              .setDescription("Your verification request is already submitted.\nPlease wait for a staff member to review it.")
+              .setFooter({ text: "Stargate • Verification" }),
+          ],
+          ephemeral: true,
+        });
+        return;
+      }
+
       const modal = await buildVerificationModal(interaction.guild.id);
       await interaction.showModal(modal);
       return;
@@ -387,7 +423,10 @@ async function handleVerificationAction(interaction: ButtonInteraction) {
   };
 
   const hasVerificatorRole = config.verificatorsRoleId ? hasRole(config.verificatorsRoleId) : false;
-  const hasStaffRole = config.staffRoleId ? hasRole(config.staffRoleId) : false;
+  let actionStaffRoleIdsArr: string[] = [];
+  try { actionStaffRoleIdsArr = config.staffRoleIds ? JSON.parse(config.staffRoleIds) : []; } catch {}
+  const hasStaffRole = (config.staffRoleId ? hasRole(config.staffRoleId) : false)
+    || actionStaffRoleIdsArr.some((id) => hasRole(id));
 
   if (!isAdmin && !hasVerificatorRole && !hasStaffRole) {
     await interaction.followUp({
@@ -401,6 +440,8 @@ async function handleVerificationAction(interaction: ButtonInteraction) {
   const idField = embed?.fields?.find((f) => f.name === "🆔 User ID");
   const memberId = idField?.value?.replace(/`/g, "").trim();
   if (!memberId) return;
+
+  const ticketChIdFromEmbed = embed?.fields?.find((f) => f.name === "🎫 Ticket")?.value;
 
   const targetMember = await interaction.guild!.members.fetch(memberId).catch(() => null);
   const disabledRow = buildActionButtons(true);
@@ -420,10 +461,16 @@ async function handleVerificationAction(interaction: ButtonInteraction) {
   if (customId === "verify_accept") {
     actionType = "accept";
     if (config.verifiedRoleId && targetMember) {
-      await targetMember.roles.add(config.verifiedRoleId).catch(() => {});
+      await targetMember.roles.add(config.verifiedRoleId).catch((e: any) => {
+        console.error("[Stargate] ROLE ADD (verified) failed:", e?.message ?? e);
+      });
+    } else {
+      console.warn("[Stargate] verify_accept — verifiedRoleId:", config.verifiedRoleId, "targetMember:", !!targetMember);
     }
     if (config.unverifiedRoleId && targetMember) {
-      await targetMember.roles.remove(config.unverifiedRoleId).catch(() => {});
+      await targetMember.roles.remove(config.unverifiedRoleId).catch((e: any) => {
+        console.error("[Stargate] ROLE REMOVE (unverified) failed:", e?.message ?? e);
+      });
     }
     await targetMember
       ?.send({
@@ -436,11 +483,15 @@ async function handleVerificationAction(interaction: ButtonInteraction) {
       })
       .catch(() => {});
 
+    if (ticketChIdFromEmbed) {
+      await interaction.guild!.channels.fetch(ticketChIdFromEmbed).then((ch) => ch?.delete()).catch(() => {});
+    }
     await interaction.message.edit({
       embeds: [
         EmbedBuilder.from(embed)
           .setColor(COLOR_ACCEPT)
-          .setFooter({ text: `✅ Accepted by ${staffName}` }),
+          .setFooter({ text: `✅ Accepted by ${staffName}` })
+          .setFields((embed.fields ?? []).filter((f) => f.name !== "🎫 Ticket")),
       ],
       components: [disabledRow],
     });
@@ -452,7 +503,7 @@ async function handleVerificationAction(interaction: ButtonInteraction) {
           new EmbedBuilder()
             .setColor(COLOR_DENY)
             .setTitle("❌ Verification Denied")
-            .setDescription("Your verification was denied. You may try again."),
+            .setDescription("You have been denied from Night Stars verification."),
         ],
       })
       .catch(() => {});
@@ -468,7 +519,16 @@ async function handleVerificationAction(interaction: ButtonInteraction) {
   } else if (customId === "verify_jail") {
     actionType = "jail";
     if (config.jailRoleId && targetMember) {
-      await targetMember.roles.add(config.jailRoleId).catch(() => {});
+      await targetMember.roles.add(config.jailRoleId).catch((e: any) => {
+        console.error("[Stargate] ROLE ADD (jail) failed:", e?.message ?? e);
+      });
+    } else {
+      console.warn("[Stargate] verify_jail — jailRoleId:", config.jailRoleId, "targetMember:", !!targetMember);
+    }
+    if (config.unverifiedRoleId && targetMember) {
+      await targetMember.roles.remove(config.unverifiedRoleId).catch((e: any) => {
+        console.error("[Stargate] ROLE REMOVE (unverified/jail) failed:", e?.message ?? e);
+      });
     }
     await targetMember
       ?.send({
@@ -477,29 +537,26 @@ async function handleVerificationAction(interaction: ButtonInteraction) {
             .setColor(COLOR_JAIL)
             .setTitle("🔒 Verification — Jailed")
             .setDescription(
-              "Your verification request was flagged. A staff member may contact you."
+              "Your verification request was flagged."
             ),
         ],
       })
       .catch(() => {});
 
+    if (ticketChIdFromEmbed) {
+      await interaction.guild!.channels.fetch(ticketChIdFromEmbed).then((ch) => ch?.delete()).catch(() => {});
+    }
     await interaction.message.edit({
       embeds: [
         EmbedBuilder.from(embed)
           .setColor(COLOR_JAIL)
-          .setFooter({ text: `🔒 Jailed by ${staffName}` }),
+          .setFooter({ text: `🔒 Jailed by ${staffName}` })
+          .setFields((embed.fields ?? []).filter((f) => f.name !== "🎫 Ticket")),
       ],
       components: [disabledRow],
     });
   } else if (customId === "verify_ticket") {
     actionType = "ticket";
-    if (!config.assistanceCategoryId) {
-      await interaction.followUp({
-        content: "Assistance category is not configured.",
-        ephemeral: true,
-      });
-      return;
-    }
 
     const ticketOverwrites: import("discord.js").OverwriteResolvable[] = [
       { id: interaction.guild!.id, deny: [PermissionsBitField.Flags.ViewChannel] },
@@ -524,6 +581,18 @@ async function handleVerificationAction(interaction: ButtonInteraction) {
       });
     }
 
+    for (const roleId of actionStaffRoleIdsArr) {
+      if (roleId !== config.verificatorsRoleId) {
+        ticketOverwrites.push({
+          id: roleId,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+          ],
+        });
+      }
+    }
+
     if (targetMember) {
       ticketOverwrites.push({
         id: targetMember.id,
@@ -546,10 +615,16 @@ async function handleVerificationAction(interaction: ButtonInteraction) {
       )
       .limit(1);
 
+    const requestsChId = config.verificationRequestsChannelId ?? config.verificationLogsChannelId;
+    const requestsCh = requestsChId
+      ? (interaction.guild!.channels.cache.get(requestsChId) as import("discord.js").TextChannel | undefined)
+      : undefined;
+    const ticketParentId = requestsCh?.parentId ?? undefined;
+
     const ticketChannel = await interaction.guild!.channels.create({
       name: `ticket-${targetMember?.user.username ?? memberId}`,
       type: ChannelType.GuildText,
-      parent: config.assistanceCategoryId,
+      parent: ticketParentId,
       permissionOverwrites: ticketOverwrites,
     });
 
@@ -591,25 +666,53 @@ async function handleVerificationAction(interaction: ButtonInteraction) {
       ],
     });
 
+    const afterTicketRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId("verify_accept").setLabel("Accept").setEmoji("✅").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId("verify_deny").setLabel("Deny").setEmoji("❌").setStyle(ButtonStyle.Danger).setDisabled(true),
+      new ButtonBuilder().setCustomId("verify_jail").setLabel("Jail").setEmoji("🔒").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("verify_ticket").setLabel("Ticket").setEmoji("🎫").setStyle(ButtonStyle.Primary).setDisabled(true),
+    );
+
     await interaction.message.edit({
       embeds: [
-        EmbedBuilder.from(embed).setFooter({
-          text: `🎫 Ticket opened by ${staffName} → #${ticketChannel.name}`,
-        }),
+        EmbedBuilder.from(embed)
+          .setFooter({ text: `🎫 Ticket opened by ${staffName} → #${ticketChannel.name}` })
+          .addFields({ name: "🎫 Ticket", value: ticketChannel.id }),
       ],
-      components: [disabledRow],
+      components: [afterTicketRow],
     });
   }
 
-  await db
-    .update(verificationSessionsTable)
-    .set({ status: customId.replace("verify_", "") })
-    .where(
-      and(
-        eq(verificationSessionsTable.guildId, guildId),
-        eq(verificationSessionsTable.memberId, memberId)
-      )
-    );
+  // Small confirmation embed for the staff member — auto-deletes after 5s
+  try {
+    const confirmColor =
+      actionType === "accept" ? COLOR_ACCEPT :
+      actionType === "jail"   ? COLOR_JAIL   : COLOR_DENY;
+    const confirmText =
+      actionType === "accept" ? `${memberUsername} has been verified.` :
+      actionType === "deny"   ? `${memberUsername}'s verification was denied.` :
+      actionType === "jail"   ? `${memberUsername} has been jailed.` :
+                                `Ticket opened for ${memberUsername}.`;
+    const confirmMsg = await interaction.followUp({
+      embeds: [new EmbedBuilder().setColor(confirmColor).setDescription(confirmText)],
+      ephemeral: false,
+    });
+    setTimeout(() => confirmMsg.delete().catch(() => {}), 5000);
+  } catch {}
+
+  if (customId !== "verify_ticket") {
+    await db
+      .update(verificationSessionsTable)
+      .set({
+        status: customId.replace("verify_", ""),
+      })
+      .where(
+        and(
+          eq(verificationSessionsTable.guildId, guildId),
+          eq(verificationSessionsTable.memberId, memberId)
+        )
+      );
+  }
 
   const requestsChannelId =
     config.verificationRequestsChannelId ?? config.verificationLogsChannelId;
@@ -633,4 +736,202 @@ async function handleVerificationAction(interaction: ButtonInteraction) {
       await logsChannel.send({ embeds: [logEmbed] });
     }
   }
+}
+
+export function registerTextCommands(client: Client) {
+  client.on("messageCreate", async (message: Message) => {
+    if (message.author.bot) return;
+    if (!message.guild) return;
+    if (!isMainGuild(message.guild.id)) return;
+
+    const config = await getConfig(message.guild.id);
+    const prefix = config?.prefix ?? '"';
+
+    if (!message.content.startsWith(prefix)) return;
+
+    const args = message.content.slice(prefix.length).trim().split(/\s+/);
+    const command = args[0]?.toLowerCase();
+
+    if (command === "pending") {
+      await handlePending(message, config);
+    } else if (command === "tasks") {
+      await handleTasks(message, config);
+    }
+  });
+}
+
+async function handlePending(message: Message, config: Awaited<ReturnType<typeof getConfig>>) {
+  if (!config) return;
+
+  const member = message.member;
+  if (!member) return;
+
+  const isAdmin = member.permissions.has(PermissionsBitField.Flags.Administrator);
+  const hasVerif = config.verificatorsRoleId ? member.roles.cache.has(config.verificatorsRoleId) : false;
+  let staffRoleIdsArr: string[] = [];
+  try { staffRoleIdsArr = config.staffRoleIds ? JSON.parse(config.staffRoleIds) : []; } catch {}
+  const hasStaff = (config.staffRoleId ? member.roles.cache.has(config.staffRoleId) : false)
+    || staffRoleIdsArr.some((id) => member.roles.cache.has(id));
+
+  if (!isAdmin && !hasVerif && !hasStaff) {
+    const deny = await message.reply({ content: "You do not have permission to use this command." });
+    setTimeout(() => deny.delete().catch(() => {}), 5000);
+    return;
+  }
+
+  const requestsChannelId = config.verificationRequestsChannelId ?? config.verificationLogsChannelId;
+  if (!requestsChannelId) {
+    const err = await message.reply({ content: "Verification requests channel not configured." });
+    setTimeout(() => err.delete().catch(() => {}), 5000);
+    return;
+  }
+
+  if (message.channelId !== requestsChannelId) {
+    const err = await message.reply({
+      content: `This command can only be used in the verification requests channel: <#${requestsChannelId}>`,
+    });
+    setTimeout(() => err.delete().catch(() => {}), 5000);
+    return;
+  }
+
+  const pending = await db
+    .select()
+    .from(verificationSessionsTable)
+    .where(
+      and(
+        eq(verificationSessionsTable.guildId, message.guild!.id),
+        eq(verificationSessionsTable.status, "submitted")
+      )
+    );
+
+  if (pending.length === 0) {
+    const reply = await message.reply({ content: "No pending verification requests." });
+    setTimeout(() => reply.delete().catch(() => {}), 5000);
+    return;
+  }
+
+  const requestsChannel = message.guild!.channels.cache.get(requestsChannelId) as TextChannel | undefined;
+  if (!requestsChannel) {
+    const err = await message.reply({ content: "Verification requests channel not found." });
+    setTimeout(() => err.delete().catch(() => {}), 5000);
+    return;
+  }
+
+  const questions = await getQuestions(message.guild!.id);
+  let reposted = 0;
+
+  for (const session of pending) {
+    try {
+      const targetMember = await message.guild!.members.fetch(session.memberId).catch(() => null);
+      const username = targetMember?.user.username ?? session.memberId;
+      const avatarUrl = targetMember?.user.displayAvatarURL({ size: 128 }) ?? null;
+      const createdTimestamp = targetMember?.user.createdTimestamp ?? Date.now();
+      const joinedAt = targetMember?.joinedTimestamp ?? null;
+
+      const answers = [
+        session.answer1 ?? "",
+        session.answer2 ?? "",
+        session.answer3 ?? "",
+        session.answer4 ?? "",
+        session.answer5 ?? "",
+      ];
+
+      const requestEmbed = buildRequestEmbed(
+        session.memberId,
+        username,
+        avatarUrl,
+        createdTimestamp,
+        joinedAt,
+        answers,
+        questions,
+        session.id
+      );
+
+      const pendingEmbed = EmbedBuilder.from(requestEmbed)
+        .setColor(COLOR_DENY)
+        .setFooter({ text: `Application #${session.id} • PENDING — Reposted by ${message.author.username}` });
+
+      await requestsChannel.send({
+        content: config.verificatorsRoleId ? `<@&${config.verificatorsRoleId}>` : undefined,
+        embeds: [pendingEmbed],
+        components: [buildActionButtons(false)],
+      });
+
+      reposted++;
+    } catch (e) {
+      console.error("[Stargate] Failed to repost pending for", session.memberId, e);
+    }
+  }
+
+  const reply = await message.reply({ content: `Reposted **${reposted}** pending verification request(s).` });
+  setTimeout(() => reply.delete().catch(() => {}), 8000);
+}
+
+
+async function handleTasks(message: Message, config: Awaited<ReturnType<typeof getConfig>>) {
+  if (!config) return;
+
+  const member = message.member;
+  if (!member) return;
+
+  const isAdmin = member.permissions.has(PermissionsBitField.Flags.Administrator);
+  const hasVerif = config.verificatorsRoleId ? member.roles.cache.has(config.verificatorsRoleId) : false;
+  let taskStaffRoleIdsArr: string[] = [];
+  try { taskStaffRoleIdsArr = config.staffRoleIds ? JSON.parse(config.staffRoleIds) : []; } catch {}
+  const hasStaff = (config.staffRoleId ? member.roles.cache.has(config.staffRoleId) : false)
+    || taskStaffRoleIdsArr.some((id) => member.roles.cache.has(id));
+
+  if (!isAdmin && !hasVerif && !hasStaff) {
+    const deny = await message.reply({ content: "You do not have permission to use this command." });
+    setTimeout(() => deny.delete().catch(() => {}), 5000);
+    return;
+  }
+
+  const pending = await db
+    .select()
+    .from(verificationSessionsTable)
+    .where(
+      and(
+        eq(verificationSessionsTable.guildId, message.guild!.id),
+        eq(verificationSessionsTable.status, "submitted")
+      )
+    )
+    .orderBy(verificationSessionsTable.createdAt);
+
+  const prefix = config.prefix ?? '"';
+
+  if (pending.length === 0) {
+    const reply = await message.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x5000ff)
+          .setTitle("Verification Tasks")
+          .setDescription("No pending verifications right now.")
+          .setFooter({ text: `Stargate • Use ${prefix}pending to repost requests` }),
+      ],
+    });
+    setTimeout(() => reply.delete().catch(() => {}), 15000);
+    return;
+  }
+
+  const now = Date.now();
+  const lines = pending.map((s, i) => {
+    const waitMs = now - (s.createdAt?.getTime() ?? now);
+    const waitMin = Math.floor(waitMs / 60000);
+    const waitHr = Math.floor(waitMin / 60);
+    const timeStr = waitHr > 0
+      ? `${waitHr}h ${waitMin % 60}m`
+      : `${waitMin}m`;
+    return `**${i + 1}.** <@${s.memberId}> — waiting **${timeStr}**`;
+  });
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5000ff)
+    .setTitle(`Verification Tasks — ${pending.length} pending`)
+    .setDescription(lines.join("\n"))
+    .setFooter({ text: `Stargate • Use ${prefix}pending to repost all to the channel` })
+    .setTimestamp();
+
+  const reply = await message.reply({ embeds: [embed] });
+  setTimeout(() => reply.delete().catch(() => {}), 30000);
 }
