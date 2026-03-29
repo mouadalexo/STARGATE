@@ -14,10 +14,15 @@ import {
   ChatInputCommandInteraction,
   TextChannel,
   ChannelType,
+  RoleSelectMenuBuilder,
 } from "discord.js";
 import { isMainGuild } from "../utils/guildFilter.js";
+import { db } from "@stargate/db";
+import { botConfigTable, verificationSessionsTable } from "@stargate/db";
+import { eq, count, isNotNull } from "drizzle-orm";
 import {
   openVerifyPanel,
+  verifyPanelState,
   handleVerifyPanelSelect,
   handleVerifyPanelSave,
   handleVerifyPanelReset,
@@ -26,6 +31,8 @@ import {
   openEmbedCustomizeModal,
   handleEmbedCustomizeSubmit,
   handleEmbedPreviewBack,
+  buildStaffSubPanel,
+  handleStaffPanelDone,
 } from "./verification.js";
 import { deployVerificationPanel } from "../modules/verification/index.js";
 
@@ -62,9 +69,51 @@ export async function registerPanelCommands(client: Client) {
 
   const helpCommand = new SlashCommandBuilder()
     .setName("help")
-    .setDescription("Show Stargate commands")
+    .setDescription("Show Stargate slash and text commands")
+    .toJSON();
+
+  const autoroleCommand = new SlashCommandBuilder()
+    .setName("autorole")
+    .setDescription("Set or view automatic roles for new members and bots")
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator)
     .addSubcommand((sub) =>
-      sub.setName("all").setDescription("Show all Stargate commands")
+      sub
+        .setName("user")
+        .setDescription("Set the role given to new human members on join")
+        .addRoleOption((opt) =>
+          opt.setName("role").setDescription("Role to give to new members").setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("bot")
+        .setDescription("Set the role given to new bots on join")
+        .addRoleOption((opt) =>
+          opt.setName("role").setDescription("Role to give to new bots").setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub.setName("view").setDescription("View current autorole settings")
+    )
+    .toJSON();
+
+  const pingCommand = new SlashCommandBuilder()
+    .setName("ping")
+    .setDescription("Check Stargate bot latency")
+    .toJSON();
+
+  const prefixCommand = new SlashCommandBuilder()
+    .setName("prefix")
+    .setDescription("View or change the bot text command prefix")
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator)
+    .addSubcommand((sub) => sub.setName("view").setDescription("Show the current prefix"))
+    .addSubcommand((sub) =>
+      sub
+        .setName("set")
+        .setDescription("Change the text command prefix")
+        .addStringOption((opt) =>
+          opt.setName("prefix").setDescription("New prefix (e.g. ! . ?)").setRequired(true).setMaxLength(5)
+        )
     )
     .toJSON();
 
@@ -73,7 +122,7 @@ export async function registerPanelCommands(client: Client) {
   const registerForGuild = async (guildId: string, guildName: string) => {
     try {
       await rest.put(Routes.applicationGuildCommands(client.user!.id, guildId), {
-        body: [setupCommand, helpCommand],
+        body: [setupCommand, helpCommand, autoroleCommand, pingCommand, prefixCommand],
       });
       console.log(`[Stargate] Registered commands for guild: ${guildName}`);
     } catch (err) {
@@ -97,21 +146,50 @@ export async function registerPanelCommands(client: Client) {
       const name = interaction.commandName;
       if (name === "setup") {
         await handleSetupCommand(interaction as ChatInputCommandInteraction);
+      } else if (name === "autorole") {
+        await handleAutoroleCommand(interaction as ChatInputCommandInteraction);
+      } else if (name === "ping") {
+        await interaction.reply({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(0x5000ff)
+              .setDescription(`Latency: **${Math.round(interaction.client.ws.ping)}ms**`)
+              .setFooter({ text: "Stargate • Verification Bot" }),
+          ],
+          ephemeral: true,
+        });
+      } else if (name === "prefix") {
+        await handlePrefixCommand(interaction as ChatInputCommandInteraction);
       } else if (name === "help") {
         await interaction.reply({
           embeds: [
             new EmbedBuilder()
               .setColor(0x5000ff)
-              .setTitle("🌟 Stargate — Commands")
+              .setTitle("Stargate — Commands")
               .addFields(
                 {
-                  name: "⚙️ Setup (admin only)",
+                  name: "Setup (admin only)",
                   value: "`/setup verification` — Configure the verification system",
                   inline: false,
                 },
                 {
-                  name: "📋 Help",
-                  value: "`/help all` — This menu",
+                  name: "Autorole (admin only)",
+                  value: "`/autorole user <role>` — Set role given to new members on join\n`/autorole bot <role>` — Set role given to new bots on join\n`/autorole view` — See current autorole settings",
+                  inline: false,
+                },
+                {
+                  name: "Prefix (admin only)",
+                  value: "`/prefix view` — Show current text command prefix\n`/prefix set <prefix>` — Change it",
+                  inline: false,
+                },
+                {
+                  name: "Text Commands (staff & verificators)",
+                  value: '`"pending` — Repost all pending requests (red, request room only)\n`"tasks` — List your pending verifications',
+                  inline: false,
+                },
+                {
+                  name: "Utility",
+                  value: "`/ping` — Check bot latency\n`/help` — This menu",
                   inline: false,
                 }
               )
@@ -127,6 +205,7 @@ export async function registerPanelCommands(client: Client) {
       const panelIds = [
         "panel_deploy_verify",
         "vp_save", "vp_reset", "vp_edit_questions", "vp_edit_embed", "vp_embed_back",
+        "vp_staff_roles_btn",
       ];
       if (panelIds.includes(interaction.customId)) {
         await handleButtonInteraction(interaction as ButtonInteraction);
@@ -187,6 +266,12 @@ async function handleButtonInteraction(interaction: ButtonInteraction) {
       await openEmbedCustomizeModal(interaction);
     } else if (customId === "vp_embed_back") {
       await handleEmbedPreviewBack(interaction);
+    } else if (customId === "vp_staff_roles_btn") {
+      const userId = interaction.user.id;
+      const state = verifyPanelState.get(userId) ?? {};
+      await interaction.reply({ ...buildStaffSubPanel(state), ephemeral: true });
+    } else if (customId === "vp_staff_done") {
+      await handleStaffPanelDone(interaction);
     }
   } catch (err) {
     console.error("[Stargate] Panel button error:", err);
@@ -201,6 +286,117 @@ async function handleRoleSelectInteraction(interaction: RoleSelectMenuInteractio
     }
   } catch (err) {
     console.error("[Stargate] Panel role select error:", err);
+  }
+}
+
+async function handleAutoroleCommand(interaction: ChatInputCommandInteraction) {
+  if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) {
+    await interaction.reply({ content: "❌ You need **Administrator** permission.", ephemeral: true });
+    return;
+  }
+
+  const guildId = interaction.guild!.id;
+  const sub = interaction.options.getSubcommand();
+
+  if (sub === "user") {
+    const role = interaction.options.getRole("role", true);
+    await db
+      .insert(botConfigTable)
+      .values({ guildId, autoroleRoleId: role.id })
+      .onConflictDoUpdate({
+        target: botConfigTable.guildId,
+        set: { autoroleRoleId: role.id },
+      });
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x5000ff)
+          .setTitle("Autorole Set — Members")
+          .setDescription(`<@&${role.id}> will now be given to every new **member** who joins.`)
+          .setFooter({ text: "Stargate • Autorole" }),
+      ],
+      ephemeral: true,
+    });
+  } else if (sub === "bot") {
+    const role = interaction.options.getRole("role", true);
+    await db
+      .insert(botConfigTable)
+      .values({ guildId, botAutoroleRoleId: role.id })
+      .onConflictDoUpdate({
+        target: botConfigTable.guildId,
+        set: { botAutoroleRoleId: role.id },
+      });
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x5000ff)
+          .setTitle("Autorole Set — Bots")
+          .setDescription(`<@&${role.id}> will now be given to every new **bot** that joins.`)
+          .setFooter({ text: "Stargate • Autorole" }),
+      ],
+      ephemeral: true,
+    });
+  } else if (sub === "view") {
+    const config = await db
+      .select()
+      .from(botConfigTable)
+      .where(eq(botConfigTable.guildId, guildId))
+      .limit(1);
+    const memberRoleId = config[0]?.autoroleRoleId;
+    const botRoleId = config[0]?.botAutoroleRoleId;
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x5000ff)
+          .setTitle("Autorole Settings")
+          .addFields(
+            { name: "Member Role", value: memberRoleId ? `<@&${memberRoleId}>` : "Not set", inline: true },
+            { name: "Bot Role", value: botRoleId ? `<@&${botRoleId}>` : "Not set", inline: true },
+          )
+          .setFooter({ text: "Stargate • Autorole" }),
+      ],
+      ephemeral: true,
+    });
+  }
+}
+
+async function handlePrefixCommand(interaction: ChatInputCommandInteraction) {
+  if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) {
+    await interaction.reply({ content: "❌ Administrator permission required.", ephemeral: true });
+    return;
+  }
+
+  const guildId = interaction.guild!.id;
+  const sub = interaction.options.getSubcommand();
+
+  if (sub === "view") {
+    const config = await db.select().from(botConfigTable).where(eq(botConfigTable.guildId, guildId)).limit(1);
+    const prefix = config[0]?.prefix ?? '"';
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x5000ff)
+          .setDescription(`Current text command prefix: \`${prefix}\`\nText commands: \`${prefix}pending\`, \`${prefix}tasks\``)
+          .setFooter({ text: "Stargate • Verification Bot" }),
+      ],
+      ephemeral: true,
+    });
+  } else if (sub === "set") {
+    const newPrefix = interaction.options.getString("prefix", true);
+    await db
+      .insert(botConfigTable)
+      .values({ guildId, prefix: newPrefix })
+      .onConflictDoUpdate({ target: botConfigTable.guildId, set: { prefix: newPrefix } });
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x5000ff)
+          .setTitle("Prefix Updated")
+          .setDescription(`Text command prefix set to \`${newPrefix}\`\nText commands: \`${newPrefix}pending\`, \`${newPrefix}tasks\``)
+          .setFooter({ text: "Stargate • Verification Bot" }),
+      ],
+      ephemeral: true,
+    });
   }
 }
 
