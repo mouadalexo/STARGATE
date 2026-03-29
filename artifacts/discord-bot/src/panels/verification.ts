@@ -26,6 +26,7 @@ interface VerifyPanelState {
   verifiedRoleId?: string;
   unverifiedRoleId?: string;
   jailRoleId?: string;
+  staffRoleIds?: string[];
   embedTitle?: string;
   embedDescription?: string;
 }
@@ -41,8 +42,12 @@ const DEFAULT_QUESTIONS = [
 ];
 
 function buildVerifyPanelEmbed(state: VerifyPanelState) {
+  const staffRolesStr = state.staffRoleIds?.length
+    ? state.staffRoleIds.map((id) => `<@&${id}>`).join(", ")
+    : "not set";
   const lines = [
     `**Verificators Role** — ${state.verificatorsRoleId ? `<@&${state.verificatorsRoleId}>` : "not set"}`,
+    `**Staff Roles** — ${staffRolesStr}`,
     `**Requests Channel** — ${state.requestsChannelId ? `<#${state.requestsChannelId}>` : "not set"}`,
     `**Logs Channel** — ${state.logsChannelId ? `<#${state.logsChannelId}>` : "not set"}`,
     `**Verified Role** — ${state.verifiedRoleId ? `<@&${state.verifiedRoleId}>` : "not set"}`,
@@ -113,9 +118,9 @@ function buildVerifyPanelComponents(state: VerifyPanelState) {
       .setLabel("Post Panel")
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
-      .setCustomId("vp_reset")
-      .setLabel("Reset")
-      .setStyle(ButtonStyle.Danger)
+      .setCustomId("vp_staff_roles_btn")
+      .setLabel(state.staffRoleIds?.length ? `Staff Roles (${state.staffRoleIds.length})` : "Staff Roles")
+      .setStyle(ButtonStyle.Secondary)
   );
 
   return [row1, row2, row3, row4, row5];
@@ -131,6 +136,8 @@ export async function openVerifyPanel(interaction: ButtonInteraction) {
     .limit(1);
 
   const existing = config[0];
+  let staffRoleIds: string[] = [];
+  try { staffRoleIds = existing?.staffRoleIds ? JSON.parse(existing.staffRoleIds) : []; } catch {}
   const state: VerifyPanelState = {
     verificatorsRoleId: existing?.verificatorsRoleId ?? undefined,
     requestsChannelId: existing?.verificationRequestsChannelId ?? existing?.verificationLogsChannelId ?? undefined,
@@ -139,6 +146,7 @@ export async function openVerifyPanel(interaction: ButtonInteraction) {
     verifiedRoleId: existing?.verifiedRoleId ?? undefined,
     unverifiedRoleId: existing?.unverifiedRoleId ?? undefined,
     jailRoleId: existing?.jailRoleId ?? undefined,
+    staffRoleIds: staffRoleIds.length ? staffRoleIds : undefined,
     embedTitle: existing?.panelEmbedTitle ?? undefined,
     embedDescription: existing?.panelEmbedDescription ?? undefined,
   };
@@ -225,7 +233,35 @@ export async function handleEditQuestionsSubmit(interaction: ModalSubmitInteract
 }
 
 export async function openEmbedCustomizeModal(interaction: ButtonInteraction) {
+  const guildId = interaction.guild!.id;
+
+  const config = await db
+    .select()
+    .from(botConfigTable)
+    .where(eq(botConfigTable.guildId, guildId))
+    .limit(1);
+
+  const saved = config[0];
   const state = verifyPanelState.get(interaction.user.id) ?? {};
+
+  const currentTitle =
+    state.embedTitle ??
+    saved?.panelEmbedTitle ??
+    "Stargate — Verification";
+
+  const currentDesc =
+    state.embedDescription ??
+    saved?.panelEmbedDescription ??
+    "Welcome!\n\nClick the button below and answer the questions.\nA staff member will review your answers and verify you shortly.";
+
+  if (saved?.panelEmbedTitle && !state.embedTitle) {
+    state.embedTitle = saved.panelEmbedTitle;
+    verifyPanelState.set(interaction.user.id, state);
+  }
+  if (saved?.panelEmbedDescription && !state.embedDescription) {
+    state.embedDescription = saved.panelEmbedDescription;
+    verifyPanelState.set(interaction.user.id, state);
+  }
 
   const modal = new ModalBuilder()
     .setCustomId("vp_embed_modal")
@@ -235,11 +271,11 @@ export async function openEmbedCustomizeModal(interaction: ButtonInteraction) {
     new ActionRowBuilder<TextInputBuilder>().addComponents(
       new TextInputBuilder()
         .setCustomId("vp_embed_title")
-        .setLabel("Title (no emojis — text only)")
+        .setLabel("Title")
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
-        .setMaxLength(100)
-        .setValue(state.embedTitle ?? "Stargate — Verification")
+        .setMaxLength(256)
+        .setValue(currentTitle.slice(0, 256))
     ),
     new ActionRowBuilder<TextInputBuilder>().addComponents(
       new TextInputBuilder()
@@ -249,10 +285,7 @@ export async function openEmbedCustomizeModal(interaction: ButtonInteraction) {
         .setRequired(true)
         .setMaxLength(2000)
         .setPlaceholder("<:name:id> static | <a:name:id> animated")
-        .setValue(
-          state.embedDescription ??
-          "Welcome!\n\nClick the button below and answer the questions.\nA staff member will review your answers and verify you shortly."
-        )
+        .setValue(currentDesc.slice(0, 2000))
     )
   );
 
@@ -291,12 +324,24 @@ export async function handleEmbedCustomizeSubmit(interaction: ModalSubmitInterac
     });
   }
 
-  const previewEmbed = new EmbedBuilder()
+  const resolvedTitle = state.embedTitle || "Stargate — Verification";
+  const rawDesc = state.embedDescription ||
+    "Welcome!\n\nClick the button below and answer the questions.\nA staff member will review your answers and verify you shortly.";
+
+  const formattedPreviewDesc = rawDesc.split('\n').map(line => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed === '\u200b' || trimmed === '\u200b\u200b') return line;
+    if (/^[#>\-\*\`\|]/.test(trimmed)) return line;
+    return `## ${line}`;
+  }).join('\n');
+
+  const previewTitleEmbed = new EmbedBuilder()
     .setColor(0x5000ff)
-    .setTitle(state.embedTitle || "Stargate — Verification")
-    .setDescription(state.embedDescription ||
-      "Welcome!\n\nClick the button below and answer the questions.\nA staff member will review your answers and verify you shortly."
-    )
+    .setDescription(`## ${resolvedTitle}`);
+
+  const previewDescEmbed = new EmbedBuilder()
+    .setColor(0x5000ff)
+    .setDescription('\u200b\n' + formattedPreviewDesc)
     .setFooter({ text: "Stargate • Verification System" });
 
   const backRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -307,7 +352,7 @@ export async function handleEmbedCustomizeSubmit(interaction: ModalSubmitInterac
   );
 
   await interaction.editReply({
-    embeds: [previewEmbed],
+    embeds: [previewTitleEmbed, previewDescEmbed],
     components: [backRow],
   });
 }
@@ -337,6 +382,11 @@ export async function handleVerifyPanelSelect(
     if (values.length >= 1) state.verifiedRoleId = values[0];
     if (values.length >= 2) state.unverifiedRoleId = values[1];
     if (values.length >= 3) state.jailRoleId = values[2];
+  } else if (interaction.customId === "vp_staff_roles") {
+    state.staffRoleIds = (interaction as RoleSelectMenuInteraction).values;
+    verifyPanelState.set(userId, state);
+    await interaction.update(buildStaffSubPanel(state));
+    return;
   }
 
   verifyPanelState.set(userId, state);
@@ -362,9 +412,12 @@ export async function handleVerifyPanelSave(interaction: ButtonInteraction) {
   const guildId = interaction.guild!.id;
   const existing = await db.select().from(botConfigTable).where(eq(botConfigTable.guildId, guildId)).limit(1);
 
+  const staffRoleIdsJson = state.staffRoleIds?.length ? JSON.stringify(state.staffRoleIds) : null;
+
   if (existing.length) {
     await db.update(botConfigTable).set({
       verificatorsRoleId: state.verificatorsRoleId,
+      staffRoleIds: staffRoleIdsJson,
       verificationRequestsChannelId: state.requestsChannelId,
       verificationLogsChannelId: state.logsChannelId ?? null,
       assistanceCategoryId: state.assistCategoryId ?? null,
@@ -377,6 +430,7 @@ export async function handleVerifyPanelSave(interaction: ButtonInteraction) {
     await db.insert(botConfigTable).values({
       guildId,
       verificatorsRoleId: state.verificatorsRoleId,
+      staffRoleIds: staffRoleIdsJson,
       verificationRequestsChannelId: state.requestsChannelId,
       verificationLogsChannelId: state.logsChannelId ?? null,
       assistanceCategoryId: state.assistCategoryId ?? null,
@@ -412,6 +466,45 @@ export async function handleVerifyPanelSave(interaction: ButtonInteraction) {
 export async function handleVerifyPanelReset(interaction: ButtonInteraction) {
   const state: VerifyPanelState = {};
   verifyPanelState.set(interaction.user.id, state);
+  await interaction.update({
+    embeds: [buildVerifyPanelEmbed(state)],
+    components: buildVerifyPanelComponents(state),
+  });
+}
+
+export function buildStaffSubPanel(state: VerifyPanelState) {
+  const staffPlaceholder = state.staffRoleIds?.length
+    ? `${state.staffRoleIds.length} role(s) selected`
+    : "Select staff roles...";
+  return {
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0x5000ff)
+        .setDescription(
+          "**Staff Roles** — members with these roles can use verification commands and buttons.\n\nClick **Back to Setup** when done."
+        )
+        .setFooter({ text: "Stargate • Staff Roles" }),
+    ],
+    components: [
+      new ActionRowBuilder<RoleSelectMenuBuilder>().addComponents(
+        new RoleSelectMenuBuilder()
+          .setCustomId("vp_staff_roles")
+          .setPlaceholder(staffPlaceholder)
+          .setMinValues(0)
+          .setMaxValues(25)
+      ),
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId("vp_staff_done")
+          .setLabel("Back to Setup")
+          .setStyle(ButtonStyle.Secondary)
+      ),
+    ],
+  };
+}
+
+export async function handleStaffPanelDone(interaction: ButtonInteraction) {
+  const state = verifyPanelState.get(interaction.user.id) ?? {};
   await interaction.update({
     embeds: [buildVerifyPanelEmbed(state)],
     components: buildVerifyPanelComponents(state),
