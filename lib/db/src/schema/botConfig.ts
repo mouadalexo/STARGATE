@@ -11,9 +11,13 @@ export const botConfigTable = pgTable("bot_config", {
   verificationRequestsChannelId: text("verification_requests_channel_id"),
   assistanceCategoryId: text("assistance_category_id"),
   staffRoleId: text("staff_role_id"),
+  staffRoleIds: text("staff_role_ids"),
   verificationQuestions: text("verification_questions"),
   panelEmbedTitle: text("panel_embed_title"),
   panelEmbedDescription: text("panel_embed_description"),
+  autoroleRoleId: text("autorole_role_id"),
+  botAutoroleRoleId: text("bot_autorole_role_id"),
+  prefix: text("prefix").default('"'),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
