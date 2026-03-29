@@ -29,9 +29,24 @@ interface VerifyPanelState {
   staffRoleIds?: string[];
   embedTitle?: string;
   embedDescription?: string;
+  _lastActivity?: number;
 }
 
 export const verifyPanelState = new Map<string, VerifyPanelState>();
+
+function setState(userId: string, state: VerifyPanelState): void {
+  state._lastActivity = Date.now();
+  verifyPanelState.set(userId, state);
+}
+
+setInterval(() => {
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  for (const [userId, state] of verifyPanelState.entries()) {
+    if ((state._lastActivity ?? 0) < cutoff) {
+      verifyPanelState.delete(userId);
+    }
+  }
+}, 5 * 60 * 1000);
 
 const DEFAULT_QUESTIONS = [
   "Wach nta mghribi ?",
@@ -150,7 +165,7 @@ export async function openVerifyPanel(interaction: ButtonInteraction) {
     embedTitle: existing?.panelEmbedTitle ?? undefined,
     embedDescription: existing?.panelEmbedDescription ?? undefined,
   };
-  verifyPanelState.set(userId, state);
+  setState(userId, state);
 
   const payload = {
     embeds: [buildVerifyPanelEmbed(state)],
@@ -258,11 +273,11 @@ export async function openEmbedCustomizeModal(interaction: ButtonInteraction) {
 
   if (saved?.panelEmbedTitle && !state.embedTitle) {
     state.embedTitle = saved.panelEmbedTitle;
-    verifyPanelState.set(interaction.user.id, state);
+    setState(interaction.user.id, state);
   }
   if (saved?.panelEmbedDescription && !state.embedDescription) {
     state.embedDescription = saved.panelEmbedDescription;
-    verifyPanelState.set(interaction.user.id, state);
+    setState(interaction.user.id, state);
   }
 
   const modal = new ModalBuilder()
@@ -322,7 +337,7 @@ export async function handleEmbedCustomizeSubmit(interaction: ModalSubmitInterac
     if (prefixVal) newPrefix = prefixVal;
   } catch {}
 
-  verifyPanelState.set(userId, state);
+  setState(userId, state);
 
   const guildId = interaction.guild!.id;
   const existing = await db.select().from(botConfigTable).where(eq(botConfigTable.guildId, guildId)).limit(1);
@@ -405,12 +420,12 @@ export async function handleVerifyPanelSelect(
     if (values.length >= 3) state.jailRoleId = values[2];
   } else if (interaction.customId === "vp_staff_roles") {
     state.staffRoleIds = (interaction as RoleSelectMenuInteraction).values;
-    verifyPanelState.set(userId, state);
+    setState(userId, state);
     await interaction.update(buildStaffSubPanel(state));
     return;
   }
 
-  verifyPanelState.set(userId, state);
+  setState(userId, state);
 
   await interaction.update({
     embeds: [buildVerifyPanelEmbed(state)],
@@ -486,7 +501,7 @@ export async function handleVerifyPanelSave(interaction: ButtonInteraction) {
 
 export async function handleVerifyPanelReset(interaction: ButtonInteraction) {
   const state: VerifyPanelState = {};
-  verifyPanelState.set(interaction.user.id, state);
+  setState(interaction.user.id, state);
   await interaction.update({
     embeds: [buildVerifyPanelEmbed(state)],
     components: buildVerifyPanelComponents(state),

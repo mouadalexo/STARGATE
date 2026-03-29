@@ -378,11 +378,15 @@ async function handleVerificationSubmit(interaction: ModalSubmitInteraction) {
     | undefined;
   if (!requestsChannel) return;
 
-  const countResult = await db
-    .select({ total: count() })
+  const sessionRow = await db
+    .select({ id: verificationSessionsTable.id })
     .from(verificationSessionsTable)
-    .where(eq(verificationSessionsTable.guildId, guildId));
-  const applicationNumber = countResult[0]?.total ?? 1;
+    .where(and(
+      eq(verificationSessionsTable.guildId, guildId),
+      eq(verificationSessionsTable.memberId, user.id)
+    ))
+    .limit(1);
+  const applicationNumber = sessionRow[0]?.id ?? 0;
 
   const questions = await getQuestions(guildId);
   const avatarUrl = user.displayAvatarURL({ size: 128 });
@@ -992,7 +996,11 @@ async function handleVcount(message: Message, config: Awaited<ReturnType<typeof 
     return;
   }
 
-  const lines = rows.map((r, i) => `**${i + 1}.** <@${r.verifierId}> \`${r.verifierUsername}\` — **${r.total}** verified`);
+  const lines = rows.map((r, i) => {
+    const cached = message.guild!.members.cache.get(r.verifierId);
+    const username = cached?.user.username ?? r.verifierUsername;
+    return `**${i + 1}.** <@${r.verifierId}> \`${username}\` — **${r.total}** verified`;
+  });
 
   const reply = await message.reply({
     embeds: [

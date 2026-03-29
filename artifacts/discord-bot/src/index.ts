@@ -1,5 +1,10 @@
+import { fileURLToPath } from "url";
+import path from "path";
 import dotenv from "dotenv";
-dotenv.config({ path: "../../.env" });
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 
 import {
   Client,
@@ -9,7 +14,7 @@ import {
 } from "discord.js";
 import { registerVerificationModule, registerTextCommands } from "./modules/verification/index.js";
 import { registerPanelCommands } from "./panels/index.js";
-import { db } from "@stargate/db";
+import { db, pool } from "@stargate/db";
 import { botConfigTable } from "@stargate/db";
 import { eq } from "drizzle-orm";
 
@@ -45,6 +50,16 @@ const client = new Client({
     Partials.GuildMember,
   ],
 });
+
+async function shutdown(signal: string) {
+  console.log(`[Stargate] Received ${signal}, shutting down gracefully...`);
+  try { client.destroy(); } catch {}
+  try { await pool.end(); } catch {}
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => { shutdown("SIGTERM"); });
+process.on("SIGINT",  () => { shutdown("SIGINT");  });
 
 setImmediate(() => {
   registerVerificationModule(client);
