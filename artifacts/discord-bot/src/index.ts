@@ -7,8 +7,11 @@ import {
   Partials,
   ActivityType,
 } from "discord.js";
-import { registerVerificationModule } from "./modules/verification/index.js";
+import { registerVerificationModule, registerTextCommands } from "./modules/verification/index.js";
 import { registerPanelCommands } from "./panels/index.js";
+import { db } from "@stargate/db";
+import { botConfigTable } from "@stargate/db";
+import { eq } from "drizzle-orm";
 
 process.on("unhandledRejection", (reason) => {
   console.error("[Stargate] Unhandled promise rejection:", reason);
@@ -45,6 +48,7 @@ const client = new Client({
 
 setImmediate(() => {
   registerVerificationModule(client);
+  registerTextCommands(client);
 });
 
 client.once("clientReady", async () => {
@@ -65,6 +69,36 @@ client.once("clientReady", async () => {
     console.log("[Stargate] Commands registered successfully");
   } catch (err) {
     console.error("[Stargate] Error registering commands:", err);
+  }
+});
+
+client.on("guildMemberAdd", async (member) => {
+  try {
+    const config = await db
+      .select()
+      .from(botConfigTable)
+      .where(eq(botConfigTable.guildId, member.guild.id))
+      .limit(1);
+
+    if (member.user.bot) {
+      const botRoleId = config[0]?.botAutoroleRoleId;
+      if (botRoleId) {
+        await member.roles.add(botRoleId).catch((err) => {
+          console.error(`[Stargate] Failed to assign bot autorole to ${member.user.tag}:`, err);
+        });
+        console.log(`[Stargate] Bot autorole assigned to ${member.user.tag} in ${member.guild.name}`);
+      }
+    } else {
+      const roleId = config[0]?.autoroleRoleId;
+      if (roleId) {
+        await member.roles.add(roleId).catch((err) => {
+          console.error(`[Stargate] Failed to assign autorole to ${member.user.tag}:`, err);
+        });
+        console.log(`[Stargate] Autorole assigned to ${member.user.tag} in ${member.guild.name}`);
+      }
+    }
+  } catch (err) {
+    console.error("[Stargate] guildMemberAdd error:", err);
   }
 });
 
