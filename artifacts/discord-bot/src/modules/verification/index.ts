@@ -412,6 +412,7 @@ async function handleVerificationSubmit(interaction: ModalSubmitInteraction) {
 
 async function handleVerificationAction(interaction: ButtonInteraction) {
   await interaction.deferUpdate();
+  await interaction.message.edit({ components: [buildActionButtons(true)] }).catch(() => {});
 
   const guildId = interaction.guild!.id;
   const config = await getConfig(guildId);
@@ -444,6 +445,22 @@ async function handleVerificationAction(interaction: ButtonInteraction) {
   const idField = embed?.fields?.find((f) => f.name === "🆔 User ID");
   const memberId = idField?.value?.replace(/`/g, "").trim();
   if (!memberId) return;
+
+  const existingSession = await db
+    .select({ status: verificationSessionsTable.status })
+    .from(verificationSessionsTable)
+    .where(and(
+      eq(verificationSessionsTable.guildId, guildId),
+      eq(verificationSessionsTable.memberId, memberId),
+    ))
+    .limit(1);
+  if (existingSession[0]?.status && existingSession[0].status !== "submitted") {
+    await interaction.followUp({
+      content: "This verification has already been processed.",
+      ephemeral: true,
+    });
+    return;
+  }
 
   const ticketChIdFromEmbed = embed?.fields?.find((f) => f.name === "🎫 Ticket")?.value;
 
