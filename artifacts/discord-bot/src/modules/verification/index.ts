@@ -835,6 +835,19 @@ async function handlePending(message: Message, config: Awaited<ReturnType<typeof
     return;
   }
 
+  const BATCH_SIZE = 3;
+
+  const totalPending = await db
+    .select({ count: count() })
+    .from(verificationSessionsTable)
+    .where(
+      and(
+        eq(verificationSessionsTable.guildId, message.guild!.id),
+        eq(verificationSessionsTable.status, "submitted")
+      )
+    );
+  const total = totalPending[0]?.count ?? 0;
+
   const pending = await db
     .select()
     .from(verificationSessionsTable)
@@ -843,7 +856,9 @@ async function handlePending(message: Message, config: Awaited<ReturnType<typeof
         eq(verificationSessionsTable.guildId, message.guild!.id),
         eq(verificationSessionsTable.status, "submitted")
       )
-    );
+    )
+    .orderBy(verificationSessionsTable.createdAt)
+    .limit(BATCH_SIZE);
 
   if (pending.length === 0) {
     const reply = await message.reply({ content: "No pending verification requests." });
@@ -917,8 +932,10 @@ async function handlePending(message: Message, config: Awaited<ReturnType<typeof
     }
   }
 
-  const reply = await message.reply({ content: `Reposted **${reposted}** pending verification request(s).` });
-  setTimeout(() => reply.delete().catch(() => {}), 8000);
+  const remaining = Number(total) - reposted;
+  const remainingText = remaining > 0 ? ` — **${remaining}** more waiting, use \`"pending\` again after resolving these.` : " — queue is now empty.";
+  const reply = await message.reply({ content: `Showing **${reposted}** of **${total}** pending request(s).${remainingText}` });
+  setTimeout(() => reply.delete().catch(() => {}), 12000);
 }
 
 
