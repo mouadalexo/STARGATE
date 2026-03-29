@@ -170,7 +170,7 @@ export async function registerPanelCommands(client: Client) {
                 {
                   name: "Text Commands (staff & verificators)",
                   value:
-                    '`"pending` — Repost all pending requests (request room only)\n`"tasks` — List pending verifications\n\n_Prefix is set inside `/setup verification` → Embed & Prefix_',
+                    '`"pending` — Repost all pending requests (request room only)\n`"case @member` — Show who verified a member and when\n`"vcount` — Leaderboard of how many members each verifier has verified\n\n_Prefix is set inside `/setup verification` → Embed & Prefix_',
                   inline: false,
                 },
                 {

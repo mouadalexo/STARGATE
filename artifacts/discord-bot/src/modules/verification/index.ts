@@ -16,8 +16,8 @@ import {
   PermissionsBitField,
 } from "discord.js";
 import { db } from "@stargate/db";
-import { botConfigTable, verificationSessionsTable } from "@stargate/db";
-import { eq, and, count } from "drizzle-orm";
+import { botConfigTable, verificationSessionsTable, verificationCasesTable } from "@stargate/db";
+import { eq, and, count, desc } from "drizzle-orm";
 import { isMainGuild } from "../../utils/guildFilter.js";
 
 const BRAND = 0x5000ff;
@@ -472,6 +472,16 @@ async function handleVerificationAction(interaction: ButtonInteraction) {
         console.error("[Stargate] ROLE REMOVE (unverified) failed:", e?.message ?? e);
       });
     }
+
+    await db.insert(verificationCasesTable).values({
+      guildId,
+      memberId,
+      verifierId: staffId,
+      verifierUsername: staffName,
+    }).catch((e: any) => {
+      console.error("[Stargate] Failed to insert verification case:", e?.message ?? e);
+    });
+
     await targetMember
       ?.send({
         embeds: [
@@ -754,8 +764,10 @@ export function registerTextCommands(client: Client) {
 
     if (command === "pending") {
       await handlePending(message, config);
-    } else if (command === "tasks") {
-      await handleTasks(message, config);
+    } else if (command === "case") {
+      await handleCase(message, config, args.slice(1));
+    } else if (command === "vcount") {
+      await handleVcount(message, config);
     }
   });
 }
@@ -868,7 +880,7 @@ async function handlePending(message: Message, config: Awaited<ReturnType<typeof
 }
 
 
-async function handleTasks(message: Message, config: Awaited<ReturnType<typeof getConfig>>) {
+async function handleCase(message: Message, config: Awaited<ReturnType<typeof getConfig>>, args: string[]) {
   if (!config) return;
 
   const member = message.member;
@@ -876,10 +888,10 @@ async function handleTasks(message: Message, config: Awaited<ReturnType<typeof g
 
   const isAdmin = member.permissions.has(PermissionsBitField.Flags.Administrator);
   const hasVerif = config.verificatorsRoleId ? member.roles.cache.has(config.verificatorsRoleId) : false;
-  let taskStaffRoleIdsArr: string[] = [];
-  try { taskStaffRoleIdsArr = config.staffRoleIds ? JSON.parse(config.staffRoleIds) : []; } catch {}
+  let staffRoleIdsArr: string[] = [];
+  try { staffRoleIdsArr = config.staffRoleIds ? JSON.parse(config.staffRoleIds) : []; } catch {}
   const hasStaff = (config.staffRoleId ? member.roles.cache.has(config.staffRoleId) : false)
-    || taskStaffRoleIdsArr.some((id) => member.roles.cache.has(id));
+    || staffRoleIdsArr.some((id) => member.roles.cache.has(id));
 
   if (!isAdmin && !hasVerif && !hasStaff) {
     const deny = await message.reply({ content: "You do not have permission to use this command." });
@@ -887,51 +899,110 @@ async function handleTasks(message: Message, config: Awaited<ReturnType<typeof g
     return;
   }
 
-  const pending = await db
-    .select()
-    .from(verificationSessionsTable)
-    .where(
-      and(
-        eq(verificationSessionsTable.guildId, message.guild!.id),
-        eq(verificationSessionsTable.status, "submitted")
-      )
-    )
-    .orderBy(verificationSessionsTable.createdAt);
-
-  const prefix = config.prefix ?? '"';
-
-  if (pending.length === 0) {
-    const reply = await message.reply({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0x5000ff)
-          .setTitle("Verification Tasks")
-          .setDescription("No pending verifications right now.")
-          .setFooter({ text: `Stargate • Use ${prefix}pending to repost requests` }),
-      ],
-    });
-    setTimeout(() => reply.delete().catch(() => {}), 15000);
+  const raw = args[0];
+  const targetId = raw?.replace(/[<@!>]/g, "");
+  if (!targetId) {
+    const err = await message.reply({ content: `Usage: \`${config.prefix ?? '"'}case @member\`` });
+    setTimeout(() => err.delete().catch(() => {}), 5000);
     return;
   }
 
-  const now = Date.now();
-  const lines = pending.map((s, i) => {
-    const waitMs = now - (s.createdAt?.getTime() ?? now);
-    const waitMin = Math.floor(waitMs / 60000);
-    const waitHr = Math.floor(waitMin / 60);
-    const timeStr = waitHr > 0
-      ? `${waitHr}h ${waitMin % 60}m`
-      : `${waitMin}m`;
-    return `**${i + 1}.** <@${s.memberId}> — waiting **${timeStr}**`;
+  const cases = await db
+    .select()
+    .from(verificationCasesTable)
+    .where(
+      and(
+        eq(verificationCasesTable.guildId, message.guild!.id),
+        eq(verificationCasesTable.memberId, targetId)
+      )
+    )
+    .orderBy(desc(verificationCasesTable.verifiedAt))
+    .limit(1);
+
+  if (cases.length === 0) {
+    const reply = await message.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(BRAND)
+          .setDescription(`No verification case found for <@${targetId}>.`)
+          .setFooter({ text: "Stargate • Cases" }),
+      ],
+    });
+    setTimeout(() => reply.delete().catch(() => {}), 8000);
+    return;
+  }
+
+  const c = cases[0];
+  const reply = await message.reply({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(COLOR_ACCEPT)
+        .setTitle("✅ Verification Case")
+        .addFields(
+          { name: "Member", value: `<@${c.memberId}>`, inline: true },
+          { name: "Verified by", value: `<@${c.verifierId}> \`${c.verifierUsername}\``, inline: true },
+          { name: "Date", value: `<t:${Math.floor(c.verifiedAt.getTime() / 1000)}:F>`, inline: false },
+        )
+        .setFooter({ text: "Stargate • Cases" }),
+    ],
   });
+  setTimeout(() => reply.delete().catch(() => {}), 20000);
+}
 
-  const embed = new EmbedBuilder()
-    .setColor(0x5000ff)
-    .setTitle(`Verification Tasks — ${pending.length} pending`)
-    .setDescription(lines.join("\n"))
-    .setFooter({ text: `Stargate • Use ${prefix}pending to repost all to the channel` })
-    .setTimestamp();
+async function handleVcount(message: Message, config: Awaited<ReturnType<typeof getConfig>>) {
+  if (!config) return;
 
-  const reply = await message.reply({ embeds: [embed] });
+  const member = message.member;
+  if (!member) return;
+
+  const isAdmin = member.permissions.has(PermissionsBitField.Flags.Administrator);
+  const hasVerif = config.verificatorsRoleId ? member.roles.cache.has(config.verificatorsRoleId) : false;
+  let staffRoleIdsArr: string[] = [];
+  try { staffRoleIdsArr = config.staffRoleIds ? JSON.parse(config.staffRoleIds) : []; } catch {}
+  const hasStaff = (config.staffRoleId ? member.roles.cache.has(config.staffRoleId) : false)
+    || staffRoleIdsArr.some((id) => member.roles.cache.has(id));
+
+  if (!isAdmin && !hasVerif && !hasStaff) {
+    const deny = await message.reply({ content: "You do not have permission to use this command." });
+    setTimeout(() => deny.delete().catch(() => {}), 5000);
+    return;
+  }
+
+  const rows = await db
+    .select({
+      verifierId: verificationCasesTable.verifierId,
+      verifierUsername: verificationCasesTable.verifierUsername,
+      total: count(),
+    })
+    .from(verificationCasesTable)
+    .where(eq(verificationCasesTable.guildId, message.guild!.id))
+    .groupBy(verificationCasesTable.verifierId, verificationCasesTable.verifierUsername)
+    .orderBy(desc(count()));
+
+  if (rows.length === 0) {
+    const reply = await message.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(BRAND)
+          .setDescription("No verifications recorded yet.")
+          .setFooter({ text: "Stargate • Verifier Stats" }),
+      ],
+    });
+    setTimeout(() => reply.delete().catch(() => {}), 8000);
+    return;
+  }
+
+  const lines = rows.map((r, i) => `**${i + 1}.** <@${r.verifierId}> \`${r.verifierUsername}\` — **${r.total}** verified`);
+
+  const reply = await message.reply({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(BRAND)
+        .setTitle("🏅 Verifier Stats")
+        .setDescription(lines.join("\n"))
+        .setFooter({ text: "Stargate • Verifier Stats" })
+        .setTimestamp(),
+    ],
+  });
   setTimeout(() => reply.delete().catch(() => {}), 30000);
 }
