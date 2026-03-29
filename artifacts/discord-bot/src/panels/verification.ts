@@ -111,7 +111,7 @@ function buildVerifyPanelComponents(state: VerifyPanelState) {
       .setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
       .setCustomId("vp_edit_embed")
-      .setLabel(state.embedTitle ? "Embed (set)" : "Embed")
+      .setLabel(state.embedTitle ? "Embed & Prefix (set)" : "Embed & Prefix")
       .setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
       .setCustomId("panel_deploy_verify")
@@ -254,6 +254,8 @@ export async function openEmbedCustomizeModal(interaction: ButtonInteraction) {
     saved?.panelEmbedDescription ??
     "Welcome!\n\nClick the button below and answer the questions.\nA staff member will review your answers and verify you shortly.";
 
+  const currentPrefix = saved?.prefix ?? '"';
+
   if (saved?.panelEmbedTitle && !state.embedTitle) {
     state.embedTitle = saved.panelEmbedTitle;
     verifyPanelState.set(interaction.user.id, state);
@@ -265,13 +267,13 @@ export async function openEmbedCustomizeModal(interaction: ButtonInteraction) {
 
   const modal = new ModalBuilder()
     .setCustomId("vp_embed_modal")
-    .setTitle("Customize Verification Panel Embed");
+    .setTitle("Embed & Prefix Settings");
 
   modal.addComponents(
     new ActionRowBuilder<TextInputBuilder>().addComponents(
       new TextInputBuilder()
         .setCustomId("vp_embed_title")
-        .setLabel("Title")
+        .setLabel("Panel Title")
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
         .setMaxLength(256)
@@ -280,12 +282,21 @@ export async function openEmbedCustomizeModal(interaction: ButtonInteraction) {
     new ActionRowBuilder<TextInputBuilder>().addComponents(
       new TextInputBuilder()
         .setCustomId("vp_embed_desc")
-        .setLabel("Description (use <:name:id> for emojis)")
+        .setLabel("Panel Description (use <:name:id> for emojis)")
         .setStyle(TextInputStyle.Paragraph)
         .setRequired(true)
         .setMaxLength(2000)
         .setPlaceholder("<:name:id> static | <a:name:id> animated")
         .setValue(currentDesc.slice(0, 2000))
+    ),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(
+      new TextInputBuilder()
+        .setCustomId("vp_prefix")
+        .setLabel('Text Command Prefix (default: ")')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(5)
+        .setValue(currentPrefix)
     )
   );
 
@@ -305,22 +316,32 @@ export async function handleEmbedCustomizeSubmit(interaction: ModalSubmitInterac
     .replace(/\\</g, "<")
     .replace(/\\>/g, ">");
 
+  let newPrefix: string | null = null;
+  try {
+    const prefixVal = interaction.fields.getTextInputValue("vp_prefix").trim();
+    if (prefixVal) newPrefix = prefixVal;
+  } catch {}
+
   verifyPanelState.set(userId, state);
 
   const guildId = interaction.guild!.id;
   const existing = await db.select().from(botConfigTable).where(eq(botConfigTable.guildId, guildId)).limit(1);
 
+  const updateData: Record<string, unknown> = {
+    panelEmbedTitle: state.embedTitle,
+    panelEmbedDescription: state.embedDescription,
+    updatedAt: new Date(),
+  };
+  if (newPrefix) updateData.prefix = newPrefix;
+
   if (existing.length) {
-    await db.update(botConfigTable).set({
-      panelEmbedTitle: state.embedTitle,
-      panelEmbedDescription: state.embedDescription,
-      updatedAt: new Date(),
-    }).where(eq(botConfigTable.guildId, guildId));
+    await db.update(botConfigTable).set(updateData as any).where(eq(botConfigTable.guildId, guildId));
   } else {
     await db.insert(botConfigTable).values({
       guildId,
       panelEmbedTitle: state.embedTitle,
       panelEmbedDescription: state.embedDescription,
+      ...(newPrefix ? { prefix: newPrefix } : {}),
     });
   }
 
@@ -342,7 +363,7 @@ export async function handleEmbedCustomizeSubmit(interaction: ModalSubmitInterac
   const previewDescEmbed = new EmbedBuilder()
     .setColor(0x5000ff)
     .setDescription('\u200b\n' + formattedPreviewDesc)
-    .setFooter({ text: "Stargate • Verification System" });
+    .setFooter({ text: newPrefix ? `Prefix saved: ${newPrefix} • Stargate • Verification System` : "Stargate • Verification System" });
 
   const backRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
