@@ -34,6 +34,8 @@ const DEFAULT_QUESTIONS = [
   "Chno lhaja libghiti tl9aha f server ?",
 ];
 
+const questionsCache = new Map<string, string[]>();
+
 async function getQuestions(guildId: string): Promise<string[]> {
   const config = await db
     .select()
@@ -79,8 +81,8 @@ function buildStartButton() {
   );
 }
 
-async function buildVerificationModal(guildId: string) {
-  const questions = await getQuestions(guildId);
+function buildVerificationModal(guildId: string) {
+  const questions = questionsCache.get(guildId) ?? DEFAULT_QUESTIONS;
 
   const modal = new ModalBuilder()
     .setCustomId("verification_modal")
@@ -248,38 +250,33 @@ export async function deployVerificationPanel(channel: TextChannel) {
 }
 
 export function registerVerificationModule(client: Client) {
+  client.once("ready", async () => {
+    for (const [guildId] of client.guilds.cache) {
+      try {
+        const config = await db.select().from(botConfigTable).where(eq(botConfigTable.guildId, guildId)).limit(1);
+        if (config[0]?.verificationQuestions) {
+          questionsCache.set(guildId, JSON.parse(config[0].verificationQuestions));
+        } else {
+          questionsCache.set(guildId, DEFAULT_QUESTIONS);
+        }
+      } catch {
+        questionsCache.set(guildId, DEFAULT_QUESTIONS);
+      }
+    }
+    console.log("[Stargate] Questions cache warmed for", client.guilds.cache.size, "guild(s)");
+  });
+
   client.on("interactionCreate", async (interaction) => {
     if (!interaction.guild) return;
     if (!isMainGuild(interaction.guild.id)) return;
 
     if (interaction.isButton() && interaction.customId === "verification_start") {
-      const existingPending = await db
-        .select()
-        .from(verificationSessionsTable)
-        .where(
-          and(
-            eq(verificationSessionsTable.guildId, interaction.guild!.id),
-            eq(verificationSessionsTable.memberId, interaction.user.id),
-            eq(verificationSessionsTable.status, "submitted")
-          )
-        )
-        .limit(1);
-
-      if (existingPending.length > 0) {
-        await interaction.reply({
-          embeds: [
-            new EmbedBuilder()
-              .setColor(BRAND)
-              .setDescription("Your verification request is already submitted.\nPlease wait for a staff member to review it.")
-              .setFooter({ text: "Stargate • Verification" }),
-          ],
-          ephemeral: true,
-        });
-        return;
+      try {
+        const modal = buildVerificationModal(interaction.guild.id);
+        await interaction.showModal(modal);
+      } catch (err) {
+        console.error("[Stargate] verification_start handler error:", err);
       }
-
-      const modal = await buildVerificationModal(interaction.guild.id);
-      await interaction.showModal(modal);
       return;
     }
 
@@ -321,6 +318,18 @@ async function handleVerificationSubmit(interaction: ModalSubmitInteraction) {
       )
     )
     .limit(1);
+
+  if (existing.length && existing[0].status === "submitted") {
+    await interaction.editReply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(BRAND)
+          .setDescription("Your verification request is already submitted.\nPlease wait for a staff member to review it.")
+          .setFooter({ text: "Stargate • Verification" }),
+      ],
+    });
+    return;
+  }
 
   if (existing.length) {
     await db
